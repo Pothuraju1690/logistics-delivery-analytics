@@ -6,3 +6,5 @@ jupyter
 streamlit
 pytest
 plotly
+reportlab
+kaleido
