@@ -1,9 +1,16 @@
+import base64
+import io
 import os
 import sys
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 # ---------------------------------------------------------
@@ -109,6 +116,360 @@ except ImportError:
 
 
 DATA_PATH = os.path.join(PROJECT_ROOT, "data", "cleaned", "logistics_cleaned.csv")
+
+
+def build_route_summary(df, top_n=5):
+    """Build the route summary used in both the dashboard and final report."""
+    required_route_columns = {
+        "origin_city",
+        "destination_city",
+        "delivery_status",
+    }
+
+    if df.empty or not required_route_columns.issubset(df.columns):
+        return pd.DataFrame()
+
+    aggregation = {
+        "Shipments": ("delivery_status", "count"),
+        "Delayed": (
+            "delivery_status",
+            lambda values: (values.astype(str).str.lower() == "delayed").sum(),
+        ),
+    }
+
+    if "delivery_days" in df.columns:
+        aggregation["Avg_Days"] = ("delivery_days", "mean")
+
+    if "total_logistics_cost" in df.columns:
+        aggregation["Total_Cost"] = ("total_logistics_cost", "sum")
+
+    routes = (
+        df.groupby(["origin_city", "destination_city"])
+        .agg(**aggregation)
+        .reset_index()
+    )
+
+    routes["Shipments"] = pd.to_numeric(routes["Shipments"], errors="coerce").fillna(0)
+    routes["Delayed"] = pd.to_numeric(routes["Delayed"], errors="coerce").fillna(0)
+
+    routes["Delay_Rate_%"] = (
+        (routes["Delayed"] / routes["Shipments"] * 100)
+        .replace([float("inf"), -float("inf")], 0)
+        .fillna(0)
+    ).round(2)
+
+    if "Avg_Days" in routes.columns:
+        routes["Avg_Days"] = routes["Avg_Days"].round(2)
+
+    routes = routes.sort_values(["Shipments", "Delay_Rate_%"], ascending=[False, False])
+    return routes.head(top_n).reset_index(drop=True)
+
+
+def build_chart_snapshot_png(df, chart_type):
+    """Create a compact Plotly chart image as PNG bytes for reports and downloads."""
+    try:
+        if chart_type == "status":
+            if "delivery_status" not in df.columns:
+                return b""
+            status_df = df["delivery_status"].value_counts().reset_index()
+            status_df.columns = ["Status", "Shipments"]
+            fig = px.pie(
+                status_df,
+                names="Status",
+                values="Shipments",
+                hole=0.5,
+                color_discrete_sequence=["#10B981", "#EF4444", "#F59E0B"],
+            )
+        elif chart_type == "shipping_cost":
+            if "shipping_mode" not in df.columns or "total_logistics_cost" not in df.columns:
+                return b""
+            mode_cost = (
+                df.groupby("shipping_mode")["total_logistics_cost"]
+                .sum()
+                .sort_values(ascending=False)
+                .reset_index()
+            )
+            fig = px.bar(
+                mode_cost,
+                x="shipping_mode",
+                y="total_logistics_cost",
+                title="Shipping Cost",
+                labels={"shipping_mode": "Shipping Mode", "total_logistics_cost": "Total Cost"},
+                color_discrete_sequence=px.colors.qualitative.Prism,
+            )
+        elif chart_type == "route_delay":
+            route_summary = build_route_summary(df, top_n=5)
+            if route_summary.empty:
+                return b""
+            fig = px.bar(
+                route_summary,
+                x="origin_city",
+                y="Delay_Rate_%",
+                color="destination_city",
+                title="Route Delay Rate",
+            )
+        else:
+            return b""
+
+        fig.update_layout(
+            margin=dict(t=20, b=20, l=20, r=20),
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            showlegend=False,
+            width=500,
+            height=250,
+        )
+
+        image_bytes = fig.to_image(format="png", scale=2)
+        return image_bytes
+    except Exception:
+        return b""
+
+
+def build_chart_snapshot_image(df, chart_type):
+    """Create a compact Plotly chart image as a valid base64 data URI for HTML embedding."""
+    image_bytes = build_chart_snapshot_png(df, chart_type)
+    if not image_bytes:
+        return ""
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return "data:image/png;base64," + encoded
+
+
+def build_report_pdf(df):
+    """Generate a real PDF report for the current filtered dataset."""
+    if df.empty:
+        buffer = io.BytesIO()
+        pdf = SimpleDocTemplate(buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = [Paragraph("No data available for report generation.", styles["Title"])]
+        pdf.build(story)
+        return buffer.getvalue()
+
+    total_orders = calculate_total_orders(df)
+    delivered = calculate_total_delivered(df)
+    delayed = calculate_total_delayed(df)
+    on_time = calculate_on_time_percentage(df)
+    avg_days = calculate_average_delivery_days(df)
+    total_cost = calculate_total_logistics_cost(df)
+
+    summary_data = [
+        ["Total Orders", f"{total_orders:,}"],
+        ["Delivered", f"{delivered:,}"],
+        ["Delayed", f"{delayed:,}"],
+        ["On-Time Rate", f"{on_time:.1f}%"],
+        ["Average Delivery Days", f"{avg_days:.1f}"],
+        ["Total Logistics Cost", f"₹{total_cost:,.0f}"],
+    ]
+
+    route_summary = build_route_summary(df, top_n=5)
+    if route_summary.empty:
+        route_table = [["No route summary data available."]]
+    else:
+        route_table = [list(route_summary.columns)] + route_summary.astype(str).values.tolist()
+
+    shipping_data = pd.DataFrame()
+    if "shipping_mode" in df.columns and "total_logistics_cost" in df.columns:
+        shipping_data = (
+            df.groupby("shipping_mode")["total_logistics_cost"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+            .rename(columns={"shipping_mode": "Shipping Mode", "total_logistics_cost": "Total Cost"})
+        )
+        shipping_data["Total Cost"] = shipping_data["Total Cost"].map(lambda v: f"₹{v:,.0f}")
+
+    if shipping_data.empty:
+        shipping_table = [["No shipping-mode summary available."]]
+    else:
+        shipping_table = [list(shipping_data.columns)] + shipping_data.astype(str).values.tolist()
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    story.append(Paragraph("Logistics Executive Report", styles["Title"]))
+    story.append(Paragraph("Generated from the current filtered dataset.", styles["Normal"]))
+    story.append(Spacer(1, 0.2 * inch))
+
+    summary_table = Table(summary_data, colWidths=[2.5 * inch, 2.5 * inch])
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E5E7EB")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    story.append(Paragraph("Executive Summary", styles["Heading2"]))
+    story.append(summary_table)
+    story.append(Spacer(1, 0.25 * inch))
+
+    status_png = build_chart_snapshot_png(df, "status")
+    shipping_png = build_chart_snapshot_png(df, "shipping_cost")
+    route_png = build_chart_snapshot_png(df, "route_delay")
+
+    if status_png:
+        story.append(Paragraph("Delivery Status", styles["Heading2"]))
+        status_image = Image(io.BytesIO(status_png), width=2.8 * inch, height=2.1 * inch)
+        story.append(status_image)
+
+    if shipping_png:
+        story.append(Paragraph("Shipping Cost", styles["Heading2"]))
+        shipping_image = Image(io.BytesIO(shipping_png), width=2.8 * inch, height=2.1 * inch)
+        story.append(shipping_image)
+
+    story.append(Paragraph("Top Freight Corridors", styles["Heading2"]))
+    route_table_obj = Table(route_table, colWidths=[1.2 * inch, 1.2 * inch, 0.9 * inch, 0.9 * inch, 0.9 * inch, 1.1 * inch])
+    route_table_obj.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    story.append(route_table_obj)
+
+    if route_png:
+        story.append(Spacer(1, 0.2 * inch))
+        story.append(Image(io.BytesIO(route_png), width=4.5 * inch, height=2.2 * inch))
+
+    story.append(Paragraph("Cost by Shipping Mode", styles["Heading2"]))
+    shipping_table_obj = Table(shipping_table, colWidths=[2.5 * inch, 2.5 * inch])
+    shipping_table_obj.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    story.append(shipping_table_obj)
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def build_report_html(df):
+    """Generate a presentation-ready HTML executive report from the current filtered dataset."""
+    if df.empty:
+        return "<html><body><h2>No data available for report generation.</h2></body></html>"
+
+    total_orders = calculate_total_orders(df)
+    delivered = calculate_total_delivered(df)
+    delayed = calculate_total_delayed(df)
+    on_time = calculate_on_time_percentage(df)
+    avg_days = calculate_average_delivery_days(df)
+    total_cost = calculate_total_logistics_cost(df)
+
+    route_summary = build_route_summary(df, top_n=5)
+    if route_summary.empty:
+        route_table_html = "<p>No route summary data available.</p>"
+    else:
+        route_table_html = route_summary.to_html(index=False, border=0, justify="left")
+
+    shipping_mode_cost = pd.DataFrame()
+    if "shipping_mode" in df.columns and "total_logistics_cost" in df.columns:
+        shipping_mode_cost = (
+            df.groupby("shipping_mode")["total_logistics_cost"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+            .rename(columns={"shipping_mode": "Shipping Mode", "total_logistics_cost": "Total Cost"})
+        )
+        shipping_mode_cost["Total Cost"] = shipping_mode_cost["Total Cost"].map("₹{:,.0f}".format)
+
+    shipping_table_html = (
+        shipping_mode_cost.to_html(index=False, border=0, justify="left")
+        if not shipping_mode_cost.empty
+        else "<p>No shipping-mode summary available.</p>"
+    )
+
+    summary_rows = [
+        ("Total Orders", f"{total_orders:,}"),
+        ("Delivered", f"{delivered:,}"),
+        ("Delayed", f"{delayed:,}"),
+        ("On-Time Rate", f"{on_time:.1f}%"),
+        ("Average Delivery Days", f"{avg_days:.1f}"),
+        ("Total Logistics Cost", f"₹{total_cost:,.0f}"),
+    ]
+
+    summary_html = "".join(
+        f"<tr><td>{label}</td><td>{value}</td></tr>" for label, value in summary_rows
+    )
+
+    status_img = build_chart_snapshot_image(df, "status")
+    shipping_img = build_chart_snapshot_image(df, "shipping_cost")
+    route_img = build_chart_snapshot_image(df, "route_delay")
+
+    status_img_html = (
+        f'<img src="{status_img}" style="max-width: 100%; height: auto; border: 1px solid #e5e7eb;" />'
+        if status_img
+        else "<p>No delivery-status chart available.</p>"
+    )
+    shipping_img_html = (
+        f'<img src="{shipping_img}" style="max-width: 100%; height: auto; border: 1px solid #e5e7eb;" />'
+        if shipping_img
+        else "<p>No shipping-cost chart available.</p>"
+    )
+    route_img_html = (
+        f'<img src="{route_img}" style="max-width: 100%; height: auto; border: 1px solid #e5e7eb;" />'
+        if route_img
+        else "<p>No route-delay chart available.</p>"
+    )
+
+    html = f"""
+    <html>
+      <head>
+        <title>Logistics Executive Report</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; margin: 32px; color: #111827; }}
+          h1, h2 {{ color: #111827; }}
+          table {{ border-collapse: collapse; width: 100%; margin-top: 12px; }}
+          th, td {{ padding: 10px 12px; border: 1px solid #e5e7eb; text-align: left; }}
+          th {{ background: #f3f4f6; }}
+          .summary {{ width: 60%; margin-bottom: 18px; }}
+          .charts {{ display: flex; gap: 20px; flex-wrap: wrap; margin-top: 12px; }}
+          .chart-box {{ width: 48%; min-width: 300px; }}
+        </style>
+      </head>
+      <body>
+        <h1>Logistics Executive Report</h1>
+        <p>Generated from the current filtered dataset.</p>
+
+        <h2>Executive Summary</h2>
+        <table class="summary">
+          <tbody>
+            {summary_html}
+          </tbody>
+        </table>
+
+        <div class="charts">
+          <div class="chart-box">
+            <h3>Delivery Status</h3>
+            {status_img_html}
+          </div>
+          <div class="chart-box">
+            <h3>Shipping Cost</h3>
+            {shipping_img_html}
+          </div>
+        </div>
+
+        <h2>Top Freight Corridors</h2>
+        {route_table_html}
+        {route_img_html}
+
+        <h2>Cost by Shipping Mode</h2>
+        {shipping_table_html}
+      </body>
+    </html>
+    """
+    return html
 
 
 # ---------------------------------------------------------
@@ -802,6 +1163,23 @@ def main():
 
     render_kpi_cards(filtered_df)
     st.markdown("---")
+
+    report_html = build_report_html(filtered_df)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Executive Report")
+    st.sidebar.download_button(
+        label="Download HTML Report",
+        data=report_html,
+        file_name="logistics_executive_report.html",
+        mime="text/html",
+    )
+    report_pdf = build_report_pdf(filtered_df)
+    st.sidebar.download_button(
+        label="Download PDF Report",
+        data=report_pdf,
+        file_name="logistics_executive_report.pdf",
+        mime="application/pdf",
+    )
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
