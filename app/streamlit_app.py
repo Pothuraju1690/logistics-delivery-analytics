@@ -149,6 +149,23 @@ def render_sidebar_filters(df):
     """Render global dashboard filters and return the filtered dataset."""
     st.sidebar.title("🎛️ Data Slicers")
 
+    filter_keys = [
+        "warehouse_filter",
+        "origin_filter",
+        "destination_filter",
+        "shipping_mode_filter",
+        "partner_filter",
+        "status_filter",
+        "date_filter",
+    ]
+
+    if st.sidebar.button("Clear all filters", key="clear_filters_button"):
+        for key in filter_keys:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    st.sidebar.caption("Default view shows all records. Use filters for focused slices.")
+
     filtered = df.copy()
 
     # Warehouse filter
@@ -158,6 +175,7 @@ def render_sidebar_filters(df):
             "Warehouse Location",
             warehouses,
             default=[],
+            key="warehouse_filter",
         )
         if selected_warehouses:
             filtered = filtered[filtered["warehouse"].isin(selected_warehouses)]
@@ -169,6 +187,7 @@ def render_sidebar_filters(df):
             "Origin City",
             origins,
             default=[],
+            key="origin_filter",
         )
         if selected_origins:
             filtered = filtered[filtered["origin_city"].isin(selected_origins)]
@@ -180,6 +199,7 @@ def render_sidebar_filters(df):
             "Destination City",
             destinations,
             default=[],
+            key="destination_filter",
         )
         if selected_destinations:
             filtered = filtered[
@@ -195,6 +215,7 @@ def render_sidebar_filters(df):
             "Shipping Mode",
             shipping_modes,
             default=[],
+            key="shipping_mode_filter",
         )
         if selected_modes:
             filtered = filtered[filtered["shipping_mode"].isin(selected_modes)]
@@ -208,6 +229,7 @@ def render_sidebar_filters(df):
             "Delivery Partner",
             partners,
             default=[],
+            key="partner_filter",
         )
         if selected_partners:
             filtered = filtered[
@@ -223,6 +245,7 @@ def render_sidebar_filters(df):
             "Delivery Status",
             statuses,
             default=[],
+            key="status_filter",
         )
         if selected_statuses:
             filtered = filtered[
@@ -239,6 +262,7 @@ def render_sidebar_filters(df):
             value=(min_date, max_date),
             min_value=min_date,
             max_value=max_date,
+            key="date_filter",
         )
 
         if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
@@ -311,6 +335,10 @@ def render_kpi_cards(df):
 # View 1: Executive Dashboard
 # ---------------------------------------------------------
 def render_executive_tab(df):
+    if df.empty:
+        st.warning("No records match the current filter selections. Please clear one or more filters to restore the data.")
+        return
+
     st.markdown("### Executive Performance Pulse")
 
     col1, col2 = st.columns(2)
@@ -436,6 +464,10 @@ def render_executive_tab(df):
 # View 2: Univariate EDA
 # ---------------------------------------------------------
 def render_univariate_tab(df):
+    if df.empty:
+        st.warning("No records match the current filter selections. Please clear one or more filters to restore the data.")
+        return
+
     st.markdown("### Univariate Analysis")
 
     col1, col2 = st.columns(2)
@@ -510,6 +542,10 @@ def render_univariate_tab(df):
 # View 3: Bivariate EDA
 # ---------------------------------------------------------
 def render_bivariate_tab(df):
+    if df.empty:
+        st.warning("No records match the current filter selections. Please clear one or more filters to restore the data.")
+        return
+
     st.markdown("### Bivariate Cross-Dimensional Analysis")
 
     col1, col2 = st.columns(2)
@@ -577,6 +613,10 @@ def render_bivariate_tab(df):
 # View 4: Multivariate EDA
 # ---------------------------------------------------------
 def render_multivariate_tab(df):
+    if df.empty:
+        st.warning("No records match the current filter selections. Please clear one or more filters to restore the data.")
+        return
+
     st.markdown("### Multivariate Correlation & Multi-Axis Explorer")
 
     col1, col2 = st.columns(2)
